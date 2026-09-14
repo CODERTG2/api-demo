@@ -399,4 +399,103 @@ describe("Shifts and Signups API (/api/shifts)", () => {
             expect(res.body.message).toBe("Shift not found");
         });
     });
+
+    describe("GET /api/shifts/needed (Urgency Ranking)", () => {
+        // Helper: build a startTime N days from now
+        const daysFromNow = (days: number) => {
+            const d = new Date();
+            d.setDate(d.getDate() + days);
+            return d.toISOString();
+        };
+
+        it("should rank shifts by urgency descending (A > B > D from image)", async () => {
+            // Shift A: daysAway=1, numNeeded=10, signedUp=5  → urgency = 5/2  = 2.50
+            // Shift B: daysAway=5, numNeeded=10, signedUp=2  → urgency = 8/6  ≈ 1.33
+            // Shift D: daysAway=10, numNeeded=5, signedUp=0  → urgency = 5/11 ≈ 0.45
+            await Volunteer.create(["v1", "v2", "v3", "v4", "v5"].map((_id) => ({ _id, name: _id })));
+            await Shift.create([
+                { title: "Shift B", startTime: daysFromNow(5), endTime: daysFromNow(5), numNeeded: 10, volunteers: ["v1", "v2"] },
+                { title: "Shift D", startTime: daysFromNow(10), endTime: daysFromNow(10), numNeeded: 5, volunteers: [] },
+                { title: "Shift A", startTime: daysFromNow(1), endTime: daysFromNow(1), numNeeded: 10, volunteers: ["v1", "v2", "v3", "v4", "v5"] },
+            ]);
+
+            const res = await request(app).get("/api/shifts/needed");
+
+            expect(res.status).toBe(200);
+            expect(res.body.length).toBe(3);
+            expect(res.body[0].title).toBe("Shift A");
+            expect(res.body[1].title).toBe("Shift B");
+            expect(res.body[2].title).toBe("Shift D");
+        });
+
+        it("should rank Shift C (daysAway=1, numNeeded=50, signedUp=25) highest — urgency=12.50", async () => {
+            // Shift C: urgency = 25/(1+1) = 12.50  |  Shift A: urgency = 5/(1+1) = 2.50
+            await Volunteer.create([
+                ...["v1", "v2", "v3", "v4", "v5"].map((_id) => ({ _id, name: _id })),
+                ...Array.from({ length: 25 }, (_, i) => ({ _id: `vc${i}`, name: `vc${i}` })),
+            ]);
+            await Shift.create([
+                { title: "Shift A", startTime: daysFromNow(1), endTime: daysFromNow(1), numNeeded: 10, volunteers: ["v1", "v2", "v3", "v4", "v5"] },
+                { title: "Shift C", startTime: daysFromNow(1), endTime: daysFromNow(1), numNeeded: 50, volunteers: Array.from({ length: 25 }, (_, i) => `vc${i}`) },
+            ]);
+
+            const res = await request(app).get("/api/shifts/needed");
+
+            expect(res.status).toBe(200);
+            expect(res.body[0].title).toBe("Shift C");
+            expect(res.body[0].urgency).toBeCloseTo(12.5, 1);
+            expect(res.body[1].title).toBe("Shift A");
+            expect(res.body[1].urgency).toBeCloseTo(2.5, 1);
+        });
+
+        it("should not include full shifts (volunteers >= numNeeded)", async () => {
+            await Volunteer.create(["v1", "v2"].map((_id) => ({ _id, name: _id })));
+            await Shift.create([
+                { title: "Full Shift", startTime: daysFromNow(1), endTime: daysFromNow(1), numNeeded: 2, volunteers: ["v1", "v2"] },
+                { title: "Open Shift", startTime: daysFromNow(1), endTime: daysFromNow(1), numNeeded: 2, volunteers: ["v1"] },
+            ]);
+
+            const res = await request(app).get("/api/shifts/needed");
+
+            expect(res.status).toBe(200);
+            expect(res.body.length).toBe(1);
+            expect(res.body[0].title).toBe("Open Shift");
+        });
+
+        it("should not include past shifts", async () => {
+            await Shift.create([
+                { title: "Past Shift", startTime: new Date(Date.now() - 86400000), endTime: new Date(Date.now() - 3600000), numNeeded: 5, volunteers: [] },
+                { title: "Future Shift", startTime: daysFromNow(1), endTime: daysFromNow(1), numNeeded: 5, volunteers: [] },
+            ]);
+
+            const res = await request(app).get("/api/shifts/needed");
+
+            expect(res.status).toBe(200);
+            expect(res.body.length).toBe(1);
+            expect(res.body[0].title).toBe("Future Shift");
+        });
+
+        it("should return at most 5 shifts", async () => {
+            await Shift.create(
+                Array.from({ length: 8 }, (_, i) => ({
+                    title: `Shift ${i}`,
+                    startTime: daysFromNow(i + 1),
+                    endTime: daysFromNow(i + 1),
+                    numNeeded: 10,
+                    // volunteers: [],
+                }))
+            );
+
+            const res = await request(app).get("/api/shifts/needed");
+
+            expect(res.status).toBe(200);
+            expect(res.body.length).toBe(5);
+        });
+
+        it("should return empty array when no shifts need volunteers", async () => {
+            const res = await request(app).get("/api/shifts/needed");
+            expect(res.status).toBe(200);
+            expect(res.body).toEqual([]);
+        });
+    });
 });

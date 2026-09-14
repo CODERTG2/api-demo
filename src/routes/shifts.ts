@@ -54,7 +54,7 @@ shiftsRouter.post("/", validate(createShiftSchema), async (req, res) => {
 
     const recurringGroupId = crypto.randomUUID();
     const shiftsToCreate = [];
-    
+
     let currentStart = new Date(startDate);
     let currentEnd = new Date(endDateObj);
 
@@ -146,7 +146,7 @@ shiftsRouter.patch("/:id", validate(modifySeriesQuerySchema, "query"), validate(
             }
             return Shift.findByIdAndUpdate(shift._id, updateObj, { new: true });
         });
-        
+
         await Promise.all(promises);
         const updatedTarget = await Shift.findById(req.params.id);
         return res.json(updatedTarget);
@@ -178,6 +178,27 @@ shiftsRouter.delete("/:id", validate(modifySeriesQuerySchema, "query"), async (r
 });
 
 // GET api/shifts/needed - returns shifts that need volunteers
+shiftsRouter.get("/needed", async (_req, res) => {
+    const now = new Date();
+    const shifts = await Shift.find({
+        startTime: { $gte: now },
+        $expr: { $lt: [{ $size: "$volunteers" }, "$numNeeded"] },
+    }).populate("volunteers");
+
+    const scored = shifts
+        .map((shift) => {
+            const daysAway = (shift.startTime.getTime() - now.getTime()) / (1000 * 60 * 60 * 24);
+            const urgency = (shift.numNeeded - shift.volunteers.length) / (daysAway + 1);
+            return { shift, urgency };
+        })
+        .sort((a, b) => b.urgency - a.urgency)
+        .slice(0, 5);
+
+    return res.json(scored.map(({ shift, urgency }) => ({
+        ...shift.toObject(),
+        urgency,
+    })));
+});
 
 // POST /api/shifts/:id/signup — volunteer signs up
 shiftsRouter.post("/:id/signup", validate(signupSchema), async (req, res) => {

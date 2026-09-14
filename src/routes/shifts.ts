@@ -1,6 +1,7 @@
 import { Router } from "express";
+import crypto from "crypto";
 import { validate } from "../middlewares/validate";
-import { createShiftSchema, updateShiftSchema, getShiftQuerySchema } from "../schemas/shift";
+import { createShiftSchema, updateShiftSchema, getShiftQuerySchema, modifySeriesQuerySchema } from "../schemas/shift";
 import { signupSchema } from "../schemas/volunteer";
 import { Shift } from "../models/Shift";
 import { Volunteer } from "../models/Volunteer";
@@ -23,24 +24,86 @@ shiftsRouter.get("/", validate(getShiftQuerySchema, "query"), async (req, res) =
 
 // POST /api/shifts — create a new shift
 shiftsRouter.post("/", validate(createShiftSchema), async (req, res) => {
-    const { title, startTime, endTime, numNeeded } = req.body;
+    const { title, startTime, endTime, numNeeded, recurrence } = req.body;
 
-    if (new Date(startTime) >= new Date(endTime)) {
+    const startDate = new Date(startTime);
+    const endDateObj = new Date(endTime);
+
+    if (startDate >= endDateObj) {
         return res.status(400).json({
             message: "Validation failed",
             errors: [{ field: "startTime", message: "startTime must be before endTime" }]
         });
     }
 
-    const shift = new Shift({ title, startTime, endTime, numNeeded });
-    await shift.save();
-    return res.status(201).json(shift);
+    if (!recurrence) {
+        const shift = new Shift({ title, startTime, endTime, numNeeded });
+        await shift.save();
+        return res.status(201).json(shift);
+    }
+
+    const { frequency, endDate: recurrenceEndDateStr } = recurrence;
+    const recurrenceEndDate = new Date(recurrenceEndDateStr);
+
+    if (startDate > recurrenceEndDate) {
+        return res.status(400).json({
+            message: "Validation failed",
+            errors: [{ field: "recurrence.endDate", message: "endDate must be after startTime" }]
+        });
+    }
+
+    const recurringGroupId = crypto.randomUUID();
+    const shiftsToCreate = [];
+    
+    let currentStart = new Date(startDate);
+    let currentEnd = new Date(endDateObj);
+
+    while (currentStart <= recurrenceEndDate) {
+        let shouldCreate = false;
+        const dayOfWeek = currentStart.getDay();
+
+        if (frequency === "daily") {
+            shouldCreate = true;
+        } else if (frequency === "weekly") {
+            shouldCreate = true;
+        } else if (frequency === "weekday") {
+            shouldCreate = dayOfWeek !== 0 && dayOfWeek !== 6;
+        } else if (frequency === "weekend") {
+            shouldCreate = dayOfWeek === 0 || dayOfWeek === 6;
+        }
+
+        if (shouldCreate) {
+            shiftsToCreate.push({
+                title,
+                startTime: new Date(currentStart),
+                endTime: new Date(currentEnd),
+                numNeeded,
+                recurringGroupId
+            });
+        }
+
+        if (frequency === "weekly") {
+            currentStart.setDate(currentStart.getDate() + 7);
+            currentEnd.setDate(currentEnd.getDate() + 7);
+        } else {
+            currentStart.setDate(currentStart.getDate() + 1);
+            currentEnd.setDate(currentEnd.getDate() + 1);
+        }
+    }
+
+    if (shiftsToCreate.length === 0) {
+        return res.status(400).json({
+            message: "Validation failed",
+            errors: [{ field: "recurrence", message: "No shifts could be created with the given rules" }]
+        });
+    }
+
+    const createdShifts = await Shift.insertMany(shiftsToCreate);
+    return res.status(201).json(createdShifts);
 });
 
-// TODO: recurring shifts.
-
 // PATCH /api/shifts/:id — partially update a shift
-shiftsRouter.patch("/:id", validate(updateShiftSchema), async (req, res) => {
+shiftsRouter.patch("/:id", validate(modifySeriesQuerySchema, "query"), validate(updateShiftSchema), async (req, res) => {
     const existingShift = await Shift.findById(req.params.id);
     if (!existingShift) {
         return res.status(404).json({ message: "Shift not found" });
@@ -56,17 +119,62 @@ shiftsRouter.patch("/:id", validate(updateShiftSchema), async (req, res) => {
         });
     }
 
-    const shift = await Shift.findByIdAndUpdate(req.params.id, req.body, { new: true });
-    return res.json(shift);
+    const updateSeries = req.query.updateSeries === "true";
+
+    if (updateSeries && existingShift.recurringGroupId) {
+        const futureShifts = await Shift.find({
+            recurringGroupId: existingShift.recurringGroupId,
+            startTime: { $gte: existingShift.startTime }
+        });
+
+        let startDiff = 0;
+        let endDiff = 0;
+        if (req.body.startTime) {
+            startDiff = new Date(req.body.startTime).getTime() - existingShift.startTime.getTime();
+        }
+        if (req.body.endTime) {
+            endDiff = new Date(req.body.endTime).getTime() - existingShift.endTime.getTime();
+        }
+
+        const promises = futureShifts.map(shift => {
+            const updateObj: any = { ...req.body };
+            if (req.body.startTime) {
+                updateObj.startTime = new Date(shift.startTime.getTime() + startDiff);
+            }
+            if (req.body.endTime) {
+                updateObj.endTime = new Date(shift.endTime.getTime() + endDiff);
+            }
+            return Shift.findByIdAndUpdate(shift._id, updateObj, { new: true });
+        });
+        
+        await Promise.all(promises);
+        const updatedTarget = await Shift.findById(req.params.id);
+        return res.json(updatedTarget);
+    } else {
+        const shift = await Shift.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        return res.json(shift);
+    }
 });
 
 // DELETE /api/shifts/:id — delete a shift
-shiftsRouter.delete("/:id", async (req, res) => {
-    const shift = await Shift.findByIdAndDelete(req.params.id);
-    if (!shift) {
+shiftsRouter.delete("/:id", validate(modifySeriesQuerySchema, "query"), async (req, res) => {
+    const existingShift = await Shift.findById(req.params.id);
+    if (!existingShift) {
         return res.status(404).json({ message: "Shift not found" });
     }
-    return res.json({ message: "Shift deleted successfully" });
+
+    const deleteSeries = req.query.deleteSeries === "true";
+
+    if (deleteSeries && existingShift.recurringGroupId) {
+        await Shift.deleteMany({
+            recurringGroupId: existingShift.recurringGroupId,
+            startTime: { $gte: existingShift.startTime }
+        });
+        return res.json({ message: "Series deleted successfully" });
+    } else {
+        await Shift.findByIdAndDelete(req.params.id);
+        return res.json({ message: "Shift deleted successfully" });
+    }
 });
 
 // GET api/shifts/needed - returns shifts that need volunteers

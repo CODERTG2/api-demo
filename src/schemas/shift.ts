@@ -9,9 +9,18 @@ export const createShiftSchema = z.object({
     startTime: z.string().datetime("startTime must be a valid ISO datetime"),
     endTime: z.string().datetime("endTime must be a valid ISO datetime"),
     numNeeded: z.number().int("numNeeded must be an integer").positive("numNeeded must be positive"),
+    recurrence: z.object({
+        frequency: z.enum(["daily", "weekly", "weekday", "weekend"]),
+        endDate: z.string().datetime("endDate must be a valid ISO datetime")
+    }).optional()
 });
 
 export const updateShiftSchema = createShiftSchema.partial().refine(
     (data) => Object.keys(data).length > 0,
     { message: "At least one field must be provided" }
 );
+
+export const modifySeriesQuerySchema = z.object({
+    updateSeries: z.enum(["true", "false"]).optional(),
+    deleteSeries: z.enum(["true", "false"]).optional()
+});

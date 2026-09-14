@@ -5,7 +5,8 @@ const shiftSchema = new mongoose.Schema({
     startTime: { type: Date, required: true },
     endTime: { type: Date, required: true },
     numNeeded: { type: Number, required: true },
-    volunteers: [{ type: String, ref: "Volunteer" }]
+    volunteers: [{ type: String, ref: "Volunteer" }],
+    recurringGroupId: { type: String, required: false }
 });
 
 export const Shift = mongoose.model("Shift", shiftSchema);
